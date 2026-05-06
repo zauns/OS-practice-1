@@ -573,39 +573,39 @@ func (s *PartitionState) listProcesses() {
 // ─────────────────────────────────────────────
 
 type ProcessB struct {
-	ID    int
-	Name  string
-	Size  int // in unit
-	Pages int // ceil(Size/PageSize)
+	ID    int // unique process identifier
+	Name  string // process name
+	Size  int // process size in memory units
+	Pages int // number of pages required (ceil(Size/PageSize))
 }
 
 type FrameB struct {
-	ProcID  int // -1 if free
-	PageNum int // local page number within the process
+	ProcID  int // process ID occupying this frame (-1 if free)
+	PageNum int // page number within the process using this frame
 }
 
 type PageEntry struct {
-	FrameNum     int  // -1 if not in memory
-	Valid        bool
-	RefBit       bool
-	LastUsed     int64 // for LRU
-	LoadedAt     int64 // for FIFO (logical clock when loaded)
+	FrameNum     int  // frame number containing this page (-1 if not in physical memory)
+	Valid        bool // whether the page is currently in physical memory
+	RefBit       bool // reference bit for Clock algorithm
+	LastUsed     int64 // timestamp of last access (for LRU algorithm)
+	LoadedAt     int64 // timestamp when page was loaded (for FIFO algorithm)
 }
 
 type PagingState struct {
-	PhysMem    int
-	VirtMem    int
-	PageSize   int
-	Unit       string
-	Algorithm  string // "fifo" | "lru" | "clock"
-	ClockK     int    // reset interval for Clock bits
-	Processes  []*ProcessB
-	Frames     []FrameB
-	PageTables map[int][]PageEntry // procID -> []PageEntry indexed by page number
-	NextProcID int
-	Simulated  bool
+	PhysMem    int // total physical memory size
+	VirtMem    int // total virtual memory size
+	PageSize   int // size of each page
+	Unit       string // unit of measurement (MB, KB, etc.)
+	Algorithm  string // page replacement algorithm ("fifo" | "lru" | "clock")
+	ClockK     int // reset interval for Clock algorithm reference bits
+	Processes  []*ProcessB // list of all processes
+	Frames     []FrameB // array of physical memory frames
+	PageTables map[int][]PageEntry // page table for each process (procID -> page entries)
+	NextProcID int // counter for next process ID
+	Simulated  bool // whether simulation has been run
 	// Stats
-	PageFaults map[string]int // algorithm -> count
+	PageFaults map[string]int // page fault statistics per algorithm
 }
 
 func newPagingState() *PagingState {
