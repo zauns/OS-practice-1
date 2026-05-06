@@ -68,27 +68,28 @@ func rpad(s string, width int) string {
 // ─────────────────────────────────────────────
 
 type ProcessA struct {
-	ID         int
-	Name       string
-	Size       int
-	InMem      bool
-	SwappedOut bool
+	ID         int    // unique process identifier
+	Name       string // process name
+	Size       int    // size in memory units
+	InMem      bool   // whether process is currently in physical memory
+	SwappedOut bool   // whether process was swapped to secondary storage
 }
 
 type Partition struct {
-	Start  int
-	Size   int
-	ProcID int // -1 = free
+	Start  int // starting address in memory
+	Size   int // size of partition
+	ProcID int // process ID occupying this partition (-1 if free)
 }
 
 type PartitionState struct {
-	MemSize    int
-	Unit       string
-	Algorithm  string // "first-fit" | "best-fit" | "worst-fit"
-	Processes  []*ProcessA
-	Partitions []Partition
-	NextProcID int
-	Allocated  bool // whether Run has been called
+	MemSize    int          // total physical memory size
+	Unit       string       // unit of measurement (MB, KB, etc.)
+	Algorithm  string       // allocation algorithm ("first-fit" | "best-fit" | "worst-fit")
+	SwapPolicy string       // swap-out policy ("random" | "fifo" | "off")
+	Processes  []*ProcessA  // list of all processes
+	Partitions []Partition  // list of memory partitions
+	NextProcID int          // counter for next process ID
+	Allocated  bool         // whether allocation has been run
 }
 
 func newPartitionState() *PartitionState {
@@ -96,6 +97,7 @@ func newPartitionState() *PartitionState {
 		MemSize:   512,
 		Unit:      "MB",
 		Algorithm: "first-fit",
+		SwapPolicy: "random",
 		NextProcID: 1,
 	}
 	// Seed with default processes to demonstrate allocation, compaction, and swapping.
@@ -107,6 +109,14 @@ func newPartitionState() *PartitionState {
 		{"P2", 80},
 		{"P3", 200},
 		{"P4", 100},
+		{"P5", 120},
+		{"P6", 92},
+		{"P7", 20},
+		{"P8", 40},
+		{"P9", 60},
+		{"P10", 72},
+		{"P11", 32},
+		{"P12", 140},
 	} {
 		s.addProcess(p.name, p.size)
 	}
@@ -212,7 +222,7 @@ func (s *PartitionState) compact() {
 }
 
 // swapOutRandom removes a random in-memory process.
-func (s *PartitionState) swapOutRandom() {
+func (s *PartitionState) swapOutRandom() bool {
 	var candidates []*ProcessA
 	for _, p := range s.Processes {
 		if p.InMem {
@@ -220,10 +230,10 @@ func (s *PartitionState) swapOutRandom() {
 		}
 	}
 	if len(candidates) == 0 {
-		return
+		return false
 	}
 	victim := candidates[rand.Intn(len(candidates))]
-	fmt.Printf("  ↯ Swap-out: processo '%s' (ID=%d) enviado para memória secundária.\n", victim.Name, victim.ID)
+	fmt.Printf("  ↯ Swap-out (aleatório): processo '%s' (ID=%d) enviado para memória secundária.\n", victim.Name, victim.ID)
 	victim.InMem = false
 	victim.SwappedOut = true
 	// free its partition
@@ -235,6 +245,34 @@ func (s *PartitionState) swapOutRandom() {
 	}
 	// merge adjacent free blocks
 	s.mergeFree()
+	return true
+}
+
+// swapOutFIFO removes the oldest in-memory process (by creation order).
+func (s *PartitionState) swapOutFIFO() bool {
+	var victim *ProcessA
+	for _, p := range s.Processes {
+		if p.InMem {
+			victim = p
+			break
+		}
+	}
+	if victim == nil {
+		return false
+	}
+	fmt.Printf("  ↯ Swap-out (FIFO): processo '%s' (ID=%d) enviado para memória secundária.\n", victim.Name, victim.ID)
+	victim.InMem = false
+	victim.SwappedOut = true
+	// free its partition
+	for i, p := range s.Partitions {
+		if p.ProcID == victim.ID {
+			s.Partitions[i].ProcID = -1
+			break
+		}
+	}
+	// merge adjacent free blocks
+	s.mergeFree()
+	return true
 }
 
 func (s *PartitionState) mergeFree() {
@@ -265,7 +303,7 @@ func (s *PartitionState) runAllocation() {
 	}
 	s.Allocated = true
 
-	fmt.Printf("\n  Alocando %d processo(s) em ordem FIFO com algoritmo '%s'...\n\n", len(s.Processes), s.Algorithm)
+	fmt.Printf("\n  Alocando %d processo(s) em ordem FIFO com algoritmo '%s' (swap-out: %s)...\n\n", len(s.Processes), s.Algorithm, s.SwapPolicy)
 
 	for _, proc := range s.Processes {
 		if proc.Size > s.MemSize {
@@ -275,20 +313,44 @@ func (s *PartitionState) runAllocation() {
 		fmt.Printf("  → Alocando '%s' (%d %s)...\n", proc.Name, proc.Size, s.Unit)
 		idx := s.tryAlloc(proc)
 		if idx >= 0 {
+			chosen := s.Partitions[idx].Size
+			leftover := chosen - proc.Size
 			s.allocAt(idx, proc)
 			fmt.Printf("    ✓ Alocado na partição iniciando em %d %s.\n", s.Partitions[idx].Start, s.Unit)
+			if s.Algorithm == "best-fit" {
+				fmt.Printf("    ↳ Best-fit escolheu bloco de %d %s (sobra %d %s).\n", chosen, s.Unit, leftover, s.Unit)
+			}
 			continue
 		}
 		// try compaction
 		s.compact()
 		idx = s.tryAlloc(proc)
 		if idx >= 0 {
+			chosen := s.Partitions[idx].Size
+			leftover := chosen - proc.Size
 			s.allocAt(idx, proc)
 			fmt.Printf("    ✓ Alocado após compactação na partição iniciando em %d %s.\n", s.Partitions[idx].Start, s.Unit)
+			if s.Algorithm == "best-fit" {
+				fmt.Printf("    ↳ Best-fit escolheu bloco de %d %s (sobra %d %s).\n", chosen, s.Unit, leftover, s.Unit)
+			}
 			continue
 		}
-		// swap out
-		s.swapOutRandom()
+		// swap out (optional)
+		if s.SwapPolicy == "off" {
+			fmt.Printf("    ✗ Swap-out desativado; não foi possível alocar '%s'.\n", proc.Name)
+			continue
+		}
+		swapped := false
+		switch s.SwapPolicy {
+		case "fifo":
+			swapped = s.swapOutFIFO()
+		default:
+			swapped = s.swapOutRandom()
+		}
+		if !swapped {
+			fmt.Printf("    ✗ Não há processos para swap-out; '%s' não foi alocado.\n", proc.Name)
+			continue
+		}
 		s.compact()
 		idx = s.tryAlloc(proc)
 		if idx >= 0 {
@@ -307,6 +369,7 @@ func (s *PartitionState) showMemoryMap() {
 		fmt.Println("  (Execute a alocação primeiro — opção 5)")
 		return
 	}
+	fmt.Printf("  Política de swap-out: %s\n", s.SwapPolicy)
 	const w1, w2, w3, w4 = 8, 14, 8, 8
 	line := fmt.Sprintf("+%s+%s+%s+%s+", sep("-", w1+2), sep("-", w2+2), sep("-", w3+2), sep("-", w4+2))
 	fmt.Println(line)
@@ -354,6 +417,7 @@ func (s *PartitionState) showFragmentation() {
 	// External fragmentation = free memory that is not contiguous
 	var freeBlocks []int
 	totalFree := 0
+	fmt.Printf("  Política de swap-out: %s\n", s.SwapPolicy)
 	for _, p := range s.Partitions {
 		if p.ProcID == -1 {
 			freeBlocks = append(freeBlocks, p.Size)
@@ -395,18 +459,19 @@ func menuPartition(s *PartitionState) {
 		fmt.Printf("\n╔══════════════════════════════════════╗\n")
 		fmt.Printf("║      ALOCAÇÃO POR PARTIÇÕES          ║\n")
 		fmt.Printf("╚══════════════════════════════════════╝\n")
-		fmt.Printf("  Config: Memória=%d%s  Algoritmo=%s\n", s.MemSize, s.Unit, s.Algorithm)
+		fmt.Printf("  Config: Memória=%d%s  Algoritmo=%s  Swap=%s\n", s.MemSize, s.Unit, s.Algorithm, s.SwapPolicy)
 		fmt.Printf("  Processos definidos: %d\n", len(s.Processes))
 		fmt.Println()
 		fmt.Println("  1. Definir tamanho da memória física")
 		fmt.Println("  2. Definir algoritmo de alocação")
-		fmt.Println("  3. Adicionar processo")
-		fmt.Println("  4. Remover processo")
-		fmt.Println("  5. Executar alocação (FIFO)")
-		fmt.Println("  6. Mostrar mapa de memória")
-		fmt.Println("  7. Mostrar relatório de fragmentação")
-		fmt.Println("  8. Listar processos")
-		fmt.Println("  9. Reiniciar")
+		fmt.Println("  3. Definir política de swap-out")
+		fmt.Println("  4. Adicionar processo")
+		fmt.Println("  5. Remover processo")
+		fmt.Println("  6. Executar alocação")
+		fmt.Println("  7. Mostrar mapa de memória")
+		fmt.Println("  8. Mostrar relatório de fragmentação")
+		fmt.Println("  9. Listar processos")
+		fmt.Println("  10. Reiniciar")
 		fmt.Println("  0. Voltar")
 		fmt.Println()
 
@@ -435,6 +500,21 @@ func menuPartition(s *PartitionState) {
 				fmt.Println("  ✗ Opção inválida.")
 			}
 		case "3":
+			fmt.Println("  1. Aleatório")
+			fmt.Println("  2. FIFO (ordem de criação)")
+			fmt.Println("  3. Desativar swap-out")
+			sp := readLine("  Escolha: ")
+			switch sp {
+			case "1":
+				s.SwapPolicy = "random"
+			case "2":
+				s.SwapPolicy = "fifo"
+			case "3":
+				s.SwapPolicy = "off"
+			default:
+				fmt.Println("  ✗ Opção inválida.")
+			}
+		case "4":
 			name := readLine("  Nome do processo: ")
 			if name == "" {
 				fmt.Println("  ✗ Nome não pode ser vazio.")
@@ -442,19 +522,19 @@ func menuPartition(s *PartitionState) {
 			}
 			size := readIntMin("  Tamanho ("+s.Unit+"): ", 1)
 			s.addProcess(name, size)
-		case "4":
+		case "5":
 			s.listProcesses()
 			id := readInt("  ID do processo a remover: ")
 			s.removeProcess(id)
-		case "5":
-			s.runAllocation()
 		case "6":
-			s.showMemoryMap()
+			s.runAllocation()
 		case "7":
-			s.showFragmentation()
+			s.showMemoryMap()
 		case "8":
-			s.listProcesses()
+			s.showFragmentation()
 		case "9":
+			s.listProcesses()
+		case "10":
 			s.reset()
 			fmt.Println("  ✓ Estado reiniciado.")
 		case "0":
@@ -470,6 +550,7 @@ func (s *PartitionState) listProcesses() {
 		fmt.Println("  (nenhum processo)")
 		return
 	}
+	fmt.Printf("  Política de swap-out: %s\n", s.SwapPolicy)
 	fmt.Printf("  %-4s %-14s %-8s %-10s %-10s\n", "ID", "Nome", "Tam.", "Na Mem.", "Swapped")
 	fmt.Printf("  %s\n", sep("-", 50))
 	for _, p := range s.Processes {
