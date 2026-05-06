@@ -157,6 +157,7 @@ func (s *PartitionState) tryAlloc(proc *ProcessA) int {
 	best := -1
 	switch s.Algorithm {
 	case "first-fit":
+		// Find the first free partition large enough to fit the process
 		for i, p := range s.Partitions {
 			if p.ProcID == -1 && p.Size >= proc.Size {
 				best = i
@@ -164,6 +165,7 @@ func (s *PartitionState) tryAlloc(proc *ProcessA) int {
 			}
 		}
 	case "best-fit":
+		// Find the smallest free partition that still fits the process (minimizes waste)
 		bestSz := math.MaxInt64
 		for i, p := range s.Partitions {
 			if p.ProcID == -1 && p.Size >= proc.Size && p.Size < bestSz {
@@ -172,6 +174,7 @@ func (s *PartitionState) tryAlloc(proc *ProcessA) int {
 			}
 		}
 	case "worst-fit":
+		// Find the largest free partition to fit the process (maximizes remaining space)
 		worstSz := -1
 		for i, p := range s.Partitions {
 			if p.ProcID == -1 && p.Size >= proc.Size && p.Size > worstSz {
