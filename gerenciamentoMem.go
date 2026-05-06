@@ -205,7 +205,6 @@ func (s *PartitionState) allocAt(idx int, proc *ProcessA) {
 // compact merges free partitions and shifts allocated ones to low addresses.
 func (s *PartitionState) compact() {
 	fmt.Println("  ↯ Realizando compactação de memória...")
-	// rebuild: collect in-use partitions in order
 	var used []Partition
 	for _, p := range s.Partitions {
 		if p.ProcID != -1 {
