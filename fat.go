@@ -192,11 +192,19 @@ func (fs *FileSystem) freeChain(startBlock int) []int {
 }
 
 // getChain percorre e retorna todos os blocos de uma cadeia a partir de startBlock.
+// Corrigido para tratar FAT_FREE (=0) como valor de entrada livre, não como
+// índice de bloco — bloco 0 é válido (raiz) e nunca é livre.
 func (fs *FileSystem) getChain(startBlock int) []int {
 	var chain []int
 	cur := startBlock
-	for cur != FAT_EOF && cur != FAT_FREE && cur >= 0 && cur < fs.NumBlocks {
+	for cur >= 0 && cur < fs.NumBlocks {
+		if fs.FAT[cur] == FAT_FREE {
+			break
+		}
 		chain = append(chain, cur)
+		if fs.FAT[cur] == FAT_EOF {
+			break
+		}
 		cur = fs.FAT[cur]
 	}
 	return chain
@@ -628,6 +636,173 @@ func (fs *FileSystem) ShowStatus() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RAID 0 — Visualização de Striping
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ShowRAID0 exibe como os blocos de cada arquivo no sistema seriam distribuídos
+// em N discos usando RAID 0 (striping simples).
+//
+// Regra RAID 0: o i-ésimo bloco do arquivo → disco físico i % totalDiscos
+func (fs *FileSystem) ShowRAID0(nDisks int) {
+	fmt.Printf("\n%s╔%s╗%s\n", cBold, strings.Repeat("═", 60), cReset)
+	fmt.Printf("%s║%s  RAID 0 — Striping (%d discos)%-28s║%s\n",
+		cBold, cCyan, nDisks, "", cReset)
+	fmt.Printf("%s╚%s╝%s\n", cBold, strings.Repeat("═", 60), cReset)
+	fmt.Printf("  %sMapeamento:%s i-ésimo bloco do arquivo → Disco i %% %d\n\n", cDim, cReset, nDisks)
+
+	// Lista todos os arquivos e diretórios com seus blocos
+	type entryInfo struct {
+		name   string
+		blocks []int
+		isDir  bool
+	}
+
+	var entries []entryInfo
+
+	// Raiz
+	rootChain := fs.getChain(0)
+	entries = append(entries, entryInfo{name: "/ (raiz)", blocks: rootChain, isDir: true})
+
+	// Arquivos na raiz
+	names := make([]string, 0, len(fs.Root.Files))
+	for n := range fs.Root.Files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		f := fs.Root.Files[n]
+		// Diretórios são exibidos separadamente na seção de subdiretórios
+		if f.IsDir {
+			continue
+		}
+		entries = append(entries, entryInfo{
+			name:   "/" + n,
+			blocks: fs.getChain(f.StartBlock),
+			isDir:  false,
+		})
+	}
+
+	// Subdiretórios e seus arquivos
+	dirNames := make([]string, 0, len(fs.Dirs))
+	for n := range fs.Dirs {
+		dirNames = append(dirNames, n)
+	}
+	sort.Strings(dirNames)
+	for _, dn := range dirNames {
+		d := fs.Dirs[dn]
+		// O bloco do diretório em si
+		entries = append(entries, entryInfo{
+			name:   dn + "/ (dir)",
+			blocks: fs.getChain(d.StartBlock),
+			isDir:  true,
+		})
+		// Arquivos dentro
+		fNames := make([]string, 0, len(d.Files))
+		for n := range d.Files {
+			fNames = append(fNames, n)
+		}
+		sort.Strings(fNames)
+		for _, n := range fNames {
+			f := d.Files[n]
+			entries = append(entries, entryInfo{
+				name:   dn + "/" + n,
+				blocks: fs.getChain(f.StartBlock),
+				isDir:  false,
+			})
+		}
+	}
+
+	if len(entries) == 0 {
+		fmt.Printf("  %sNenhum arquivo ou diretório no sistema.%s\n", cDim, cReset)
+		return
+	}
+
+	// ── Exibe por entrada ──────────────────────────────────────────────────
+	for _, e := range entries {
+		if len(e.blocks) == 0 {
+			continue
+		}
+
+		icon := "📄"
+		if e.isDir {
+			icon = "📁"
+		}
+		fmt.Printf("  %s %s%s%s  %s(blocos: %v)%s — %d bloco(s)\n",
+			icon, cBold, e.name, cReset,
+			cDim, e.blocks, cReset,
+			len(e.blocks))
+
+		// Agrupa blocos por disco (pela posição sequencial no arquivo)
+		disks := make([][]int, nDisks)
+		for i, b := range e.blocks {
+			d := i % nDisks // i = stripe index dentro do arquivo
+			disks[d] = append(disks[d], b)
+		}
+
+		for i := 0; i < nDisks; i++ {
+			if len(disks[i]) > 0 {
+				blkStrs := make([]string, len(disks[i]))
+				for j, b := range disks[i] {
+					blkStrs[j] = fmt.Sprintf("%s%d%s", cCyan, b, cReset)
+				}
+				fmt.Printf("    %sDisco %d%s (N%%%d=%d): %s\n",
+					cYellow, i, cReset,
+					nDisks, i,
+					strings.Join(blkStrs, ", "))
+			} else {
+				fmt.Printf("    %sDisco %d%s (N%%%d=%d): %s—%s\n",
+					cYellow, i, cReset,
+					nDisks, i,
+					cDim, cReset)
+			}
+		}
+		fmt.Println()
+	}
+
+	// ── Resumo por disco ───────────────────────────────────────────────────
+	fmt.Printf("  %s▸ Resumo por disco:%s\n", cBold, cReset)
+	totals := make([]int, nDisks)
+	for _, e := range entries {
+		for i := range e.blocks {
+			d := i % nDisks
+			totals[d]++
+		}
+	}
+
+	largest := 0
+	for _, t := range totals {
+		if t > largest {
+			largest = t
+		}
+	}
+	barWidth := 20
+
+	for i := 0; i < nDisks; i++ {
+		pct := 0.0
+		if largest > 0 {
+			pct = float64(totals[i]) / float64(largest)
+		}
+		barLen := int(pct * float64(barWidth))
+		bar := strings.Repeat("█", barLen)
+		spaces := barWidth - barLen
+		if spaces < 0 {
+			spaces = 0
+		}
+		fmt.Printf("  %sDisco %d:%s %d blocos  %s%s%s%s%s\n",
+			cYellow, i, cReset,
+			totals[i],
+			cCyan, bar, strings.Repeat("░", spaces), cReset,
+			func() string {
+				if totals[i] == 0 {
+					return cDim + " (vazio)" + cReset
+				}
+				return ""
+			}())
+	}
+	fmt.Println()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Funções auxiliares de análise e formatação
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -720,6 +895,7 @@ func printHelp() {
   %sfat%s                        Exibe a tabela FAT completa (baixo nível)
   %smap%s                        Exibe mapa visual de blocos
   %sstatus%s                     Exibe fragmentação e status do disco
+  %sraid%s     <n_discos>         Exibe distribuição RAID 0 dos blocos em N discos
   %shelp%s                       Exibe esta ajuda
   %sexit%s                       Sai do simulador
 
@@ -732,6 +908,7 @@ func printHelp() {
 		cCyan, cReset, cCyan, cReset, cCyan, cReset,
 		cCyan, cReset, cCyan, cReset, cCyan, cReset,
 		cCyan, cReset, cCyan, cReset, cCyan, cReset,
+		cCyan, cReset,
 		cBold, cReset, cBold, cReset)
 }
 
@@ -892,6 +1069,18 @@ func main() {
 
 		case "status":
 			fs.ShowStatus()
+
+		case "raid", "raid0":
+			if len(parts) < 2 {
+				fmt.Printf("%sUso: raid <n_discos>   ex: raid 4%s\n", cRed, cReset)
+				continue
+			}
+			n, parseErr := strconv.Atoi(parts[1])
+			if parseErr != nil || n < 2 {
+				fmt.Printf("%sErro: número de discos inválido (mínimo 2)%s\n", cRed, cReset)
+				continue
+			}
+			fs.ShowRAID0(n)
 
 		default:
 			fmt.Printf("%sComando desconhecido: '%s'. Digite 'help' para ajuda.%s\n",
